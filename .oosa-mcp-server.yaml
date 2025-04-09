@@ -1,0 +1,6 @@
+service: oosa-mcp-server
+
+
+log:
+  level: debug
+  target: os

@@ -1,6 +1,7 @@
 package config
 
 var (
-	Date   = "undefined"
-	Commit = "undefined"
+	Version = "undefined"
+	Date    = "undefined"
+	Commit  = "undefined"
 )
