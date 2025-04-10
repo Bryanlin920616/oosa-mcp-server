@@ -127,9 +127,10 @@ func runStdioServer(cfg runConfig) error {
 	defer stop()
 
 	// Create client like github, mongodb, etc.
+	client := &oosa.Client{} // TODO: use real client
 
 	// Create server
-	mcpServer := oosa.NewServer(config.Version)
+	mcpServer := oosa.NewServer(client, config.Version)
 	stdioServer := server.NewStdioServer(mcpServer)
 
 	// Set error logger
