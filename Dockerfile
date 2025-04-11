@@ -21,7 +21,8 @@ RUN --mount=type=cache,target=/root/.cache/go-build CGO_ENABLED=0 go build \
 FROM gcr.io/distroless/base-debian12
 # Set the working directory
 WORKDIR /server
-# Copy the binary from the build stage
+# Copy the binary and config from the build stage
 COPY --from=build /build/oosa-mcp-server .
+COPY .oosa-mcp-server.yaml /server/.oosa-mcp-server.yaml
 # Command to run the server
-CMD ["./oosa-mcp-server", "stdio"]
+CMD ["./oosa-mcp-server", "serve", "--config", "/server/.oosa-mcp-server.yaml"]

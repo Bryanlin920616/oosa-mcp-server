@@ -1,6 +1,19 @@
 service: oosa-mcp-server
 
+# 服務器配置
+server:
+  # 服務器模式：stdio 或 sse
+  mode: sse
+  # SSE 模式的監聽地址（僅在 SSE 模式下使用）
+  addr: 0.0.0.0:8080
 
+# 日誌配置
 log:
+  # 日誌級別：debug, info, warn, error
   level: debug
+  # 日誌輸出目標：os（標準輸出）或文件路徑
   target: os
+  # 日誌文件路徑（當 target 為文件路徑時使用）
+  file: ""
+  # 是否啟用命令日誌記錄
+  enable_command_logging: true

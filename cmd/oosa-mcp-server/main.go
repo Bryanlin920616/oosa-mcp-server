@@ -11,6 +11,7 @@ import (
 	"syscall"
 
 	"github.com/Bryanlin920616/oosa-mcp-server/config"
+	iolog "github.com/Bryanlin920616/oosa-mcp-server/pkg/log"
 	"github.com/Bryanlin920616/oosa-mcp-server/pkg/oosa"
 	"github.com/mark3labs/mcp-go/server"
 	log "github.com/sirupsen/logrus"
@@ -20,6 +21,14 @@ import (
 
 var cfgFile string
 
+// ServerMode 定義了可用的 server 模式
+type ServerMode string
+
+const (
+	ServerModeStdio ServerMode = "stdio"
+	ServerModeSSE   ServerMode = "sse"
+)
+
 var (
 	rootCmd = &cobra.Command{
 		Use:     "server",
@@ -28,10 +37,10 @@ var (
 		Version: fmt.Sprintf("%s (%s) %s", config.Version, config.Commit, config.Date),
 	}
 
-	stdioCmd = &cobra.Command{
-		Use:   "stdio",
-		Short: "Start stdio server",
-		Long:  `Start a server that communicates via standard input/output streams using JSON-RPC messages.`,
+	serverCmd = &cobra.Command{
+		Use:   "serve",
+		Short: "Start the server",
+		Long:  `Start the server in the specified mode (stdio or sse)`,
 		Run: func(_ *cobra.Command, _ []string) {
 			logFile := viper.GetString("log-file")
 			logger, err := initLogger(logFile)
@@ -42,10 +51,12 @@ var (
 			cfg := runConfig{
 				logger:      logger,
 				logCommands: viper.GetBool("enable-command-logging"),
+				mode:        ServerMode(viper.GetString("server.mode")),
+				addr:        viper.GetString("server.addr"),
 			}
 
-			if err := runStdioServer(cfg); err != nil {
-				stdlog.Fatal("failed to run stdio server:", err)
+			if err := runServer(cfg); err != nil {
+				stdlog.Fatal("failed to run server:", err)
 			}
 		},
 	}
@@ -54,22 +65,22 @@ var (
 func init() {
 	cobra.OnInitialize(initConfig)
 
-	// Here you will define your flags and configuration settings.
-	// Cobra supports persistent flags, which, if defined here,
-	// will be global for your application.
-
+	// 設定配置檔路徑
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.oosa-mcp-server.yaml)")
-	rootCmd.PersistentFlags().String("log-file", "", "Path to log file")
-	rootCmd.PersistentFlags().Bool("enable-command-logging", false, "When enabled, the server will log all command requests and responses")
 
-	_ = viper.BindPFlag("log-file", rootCmd.PersistentFlags().Lookup("log-file"))
-	_ = viper.BindPFlag("enable-command-logging", rootCmd.PersistentFlags().Lookup("enable-command-logging"))
+	// 設定 server 相關的 flag
+	serverCmd.Flags().String("mode", string(ServerModeStdio), "Server mode (stdio or sse)")
+	serverCmd.Flags().String("addr", "localhost:8080", "Server address (for SSE mode)")
+	serverCmd.Flags().String("log-file", "", "Path to log file")
+	serverCmd.Flags().Bool("enable-command-logging", false, "When enabled, the server will log all command requests and responses")
 
-	// Cobra also supports local flags, which will only run
-	// when this action is called directly.
+	// 綁定 flag 到 viper
+	_ = viper.BindPFlag("server.mode", serverCmd.Flags().Lookup("mode"))
+	_ = viper.BindPFlag("server.addr", serverCmd.Flags().Lookup("addr"))
+	_ = viper.BindPFlag("log-file", serverCmd.Flags().Lookup("log-file"))
+	_ = viper.BindPFlag("enable-command-logging", serverCmd.Flags().Lookup("enable-command-logging"))
 
-	rootCmd.AddCommand(stdioCmd)
-	rootCmd.Flags().BoolP("toggle", "t", false, "Help message for toggle")
+	rootCmd.AddCommand(serverCmd)
 }
 
 // initConfig reads in config file and ENV variables if set.
@@ -82,7 +93,7 @@ func initConfig() {
 		home, err := os.Getwd()
 		cobra.CheckErr(err)
 
-		// Search config in home directory with name ".post" (without extension).
+		// Search config in home directory with name ".oosa-mcp-server" (without extension).
 		viper.AddConfigPath(home)
 		viper.SetConfigType("yaml")
 		viper.SetConfigName(".oosa-mcp-server")
@@ -99,8 +110,22 @@ func initConfig() {
 func initLogger(outPath string) (*log.Logger, error) {
 	logger := log.New()
 
-	if outPath == "" {
-		// 沒有指定日誌文件，使用標準錯誤輸出
+	// 設定日誌級別
+	level := viper.GetString("log.level")
+	if level != "" {
+		logLevel, err := log.ParseLevel(level)
+		if err != nil {
+			return nil, fmt.Errorf("invalid log level: %w", err)
+		}
+		logger.SetLevel(logLevel)
+	} else {
+		logger.SetLevel(log.DebugLevel)
+	}
+
+	// 設定日誌輸出
+	target := viper.GetString("log.target")
+	switch target {
+	case "os":
 		logger.SetOutput(os.Stderr)
 		return logger, nil
 	}
@@ -119,9 +144,11 @@ func initLogger(outPath string) (*log.Logger, error) {
 type runConfig struct {
 	logger      *log.Logger
 	logCommands bool
+	mode        ServerMode
+	addr        string
 }
 
-func runStdioServer(cfg runConfig) error {
+func runServer(cfg runConfig) error {
 	// Create app context
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -131,28 +158,46 @@ func runStdioServer(cfg runConfig) error {
 
 	// Create server
 	mcpServer := oosa.NewServer(client, config.Version)
-	stdioServer := server.NewStdioServer(mcpServer)
 
-	// Set error logger
-	stdLogger := stdlog.New(cfg.logger.Writer(), "stdioserver", 0)
-	stdioServer.SetErrorLogger(stdLogger)
+	// Create error logger
+	stdLogger := stdlog.New(cfg.logger.Writer(), "server", 0)
 
 	// Start listening for messages
 	errC := make(chan error, 1)
 	go func() {
-		in, out := io.Reader(os.Stdin), io.Writer(os.Stdout)
+		switch cfg.mode {
+		case ServerModeStdio:
+			// 建立 stdio server
+			stdioServer := server.NewStdioServer(mcpServer)
+			stdioServer.SetErrorLogger(stdLogger)
+			cfg.logger.Info("Starting server in stdio mode")
 
-		if cfg.logCommands {
-			// TODO: Add command logging at path: pkg/log/io.go
-			// loggedIO := iolog.NewIOLogger(in, out, cfg.logger)
-			// in, out = loggedIO, loggedIO
+			// 設定輸入輸出
+			in, out := io.Reader(os.Stdin), io.Writer(os.Stdout)
+			if cfg.logCommands {
+				// TODO: Add command logging
+				loggedIO := iolog.NewIOLogger(in, out, cfg.logger)
+				in, out = loggedIO, loggedIO
+			}
+
+			errC <- stdioServer.Listen(ctx, in, out)
+
+		case ServerModeSSE:
+			// 建立 SSE server
+			sseServer := server.NewSSEServer(mcpServer,
+				server.WithBaseURL("http://localhost:8080"),
+			)
+			cfg.logger.Infof("Starting server in SSE mode on %s", cfg.addr)
+
+			errC <- sseServer.Start(cfg.addr)
+
+		default:
+			errC <- fmt.Errorf("unsupported server mode: %s", cfg.mode)
 		}
-
-		errC <- stdioServer.Listen(ctx, in, out)
 	}()
 
-	// Output github-mcp-server string
-	_, _ = fmt.Fprintf(os.Stderr, "OOSA MCP Server running on stdio\n")
+	// Output server info
+	_, _ = fmt.Fprintf(os.Stderr, "OOSA MCP Server running in %s mode\n", cfg.mode)
 
 	// Wait for shutdown signal
 	select {
