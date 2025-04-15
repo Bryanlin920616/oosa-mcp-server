@@ -21,12 +21,14 @@ import (
 
 var cfgFile string
 
-// ServerMode 定義了可用的 server 模式
-type ServerMode string
+// ServerTransport 定義服務器的傳輸方式
+type ServerTransport string
 
 const (
-	ServerModeStdio ServerMode = "stdio"
-	ServerModeSSE   ServerMode = "sse"
+	// ServerTransportStdio 使用標準輸入輸出進行通信
+	ServerTransportStdio ServerTransport = "stdio"
+	// ServerTransportSSE 使用 SSE 進行通信
+	ServerTransportSSE ServerTransport = "sse"
 )
 
 var (
@@ -51,8 +53,9 @@ var (
 			cfg := runConfig{
 				logger:      logger,
 				logCommands: viper.GetBool("enable-command-logging"),
-				mode:        ServerMode(viper.GetString("server.mode")),
+				transport:   ServerTransport(viper.GetString("server.transport")),
 				addr:        viper.GetString("server.addr"),
+				baseURL:     viper.GetString("server.base_url"),
 			}
 
 			if err := runServer(cfg); err != nil {
@@ -69,14 +72,16 @@ func init() {
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.oosa-mcp-server.yaml)")
 
 	// 設定 server 相關的 flag
-	serverCmd.Flags().String("mode", string(ServerModeStdio), "Server mode (stdio or sse)")
-	serverCmd.Flags().String("addr", "localhost:8080", "Server address (for SSE mode)")
+	serverCmd.Flags().StringP("transport", "t", "stdio", "服務器傳輸方式 (stdio 或 sse)")
+	serverCmd.Flags().StringP("addr", "a", "0.0.0.0:8080", "SSE 服務器監聽地址")
+	serverCmd.Flags().StringP("base-url", "b", "http://localhost:8080", "SSE 服務器 base URL（用於 origin 驗證）")
 	serverCmd.Flags().String("log-file", "", "Path to log file")
 	serverCmd.Flags().Bool("enable-command-logging", false, "When enabled, the server will log all command requests and responses")
 
 	// 綁定 flag 到 viper
-	_ = viper.BindPFlag("server.mode", serverCmd.Flags().Lookup("mode"))
+	_ = viper.BindPFlag("server.mode", serverCmd.Flags().Lookup("transport"))
 	_ = viper.BindPFlag("server.addr", serverCmd.Flags().Lookup("addr"))
+	_ = viper.BindPFlag("server.base_url", serverCmd.Flags().Lookup("base-url"))
 	_ = viper.BindPFlag("log-file", serverCmd.Flags().Lookup("log-file"))
 	_ = viper.BindPFlag("enable-command-logging", serverCmd.Flags().Lookup("enable-command-logging"))
 
@@ -144,8 +149,9 @@ func initLogger(outPath string) (*log.Logger, error) {
 type runConfig struct {
 	logger      *log.Logger
 	logCommands bool
-	mode        ServerMode
+	transport   ServerTransport
 	addr        string
+	baseURL     string
 }
 
 func runServer(cfg runConfig) error {
@@ -165,8 +171,8 @@ func runServer(cfg runConfig) error {
 	// Start listening for messages
 	errC := make(chan error, 1)
 	go func() {
-		switch cfg.mode {
-		case ServerModeStdio:
+		switch cfg.transport {
+		case ServerTransportStdio:
 			// 建立 stdio server
 			stdioServer := server.NewStdioServer(mcpServer)
 			stdioServer.SetErrorLogger(stdLogger)
@@ -182,22 +188,23 @@ func runServer(cfg runConfig) error {
 
 			errC <- stdioServer.Listen(ctx, in, out)
 
-		case ServerModeSSE:
+		case ServerTransportSSE:
 			// 建立 SSE server
+			cfg.logger.Infof("Set base URL: %s", cfg.baseURL)
 			sseServer := server.NewSSEServer(mcpServer,
-				server.WithBaseURL("http://localhost:8080"),
+				server.WithBaseURL(cfg.baseURL),
 			)
 			cfg.logger.Infof("Starting server in SSE mode on %s", cfg.addr)
 
-			errC <- sseServer.Start(cfg.addr)
+			errC <- sseServer.Start(cfg.addr) // server listen 的地址
 
 		default:
-			errC <- fmt.Errorf("unsupported server mode: %s", cfg.mode)
+			errC <- fmt.Errorf("unsupported server transport: %s", cfg.transport)
 		}
 	}()
 
 	// Output server info
-	_, _ = fmt.Fprintf(os.Stderr, "OOSA MCP Server running in %s mode\n", cfg.mode)
+	_, _ = fmt.Fprintf(os.Stderr, "OOSA MCP Server running in %s mode\n", cfg.transport)
 
 	// Wait for shutdown signal
 	select {

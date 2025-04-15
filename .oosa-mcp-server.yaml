@@ -2,10 +2,12 @@ service: oosa-mcp-server
 
 # 服務器配置
 server:
-  # 服務器模式：stdio 或 sse
-  mode: sse
+  # 服務器傳輸方式：stdio 或 sse
+  transport: sse
   # SSE 模式的監聽地址（僅在 SSE 模式下使用）
   addr: 0.0.0.0:8080
+  # SSE 模式的 base URL（用於 origin 驗證），用戶端config填寫url=base_url/sse
+  base_url: http://localhost:8080
 
 # 日誌配置
 log:
